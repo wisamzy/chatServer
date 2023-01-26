@@ -8,275 +8,304 @@
 # include <signal.h>
 # include <sys/ioctl.h>
 
-#define msg_head currCon->write_msg_head
-#define msg_tail currCon->write_msg_tail
-static int turn_off = 0;
+static int end_server = 0;
 
 void intHandler(int SIG_INT) {
-    turn_off = 1;
+    end_server = 1;
 }
 
-int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        printf("Usage: ./chatServer <number of clients> <port>");
-        exit(EXIT_FAILURE);
-    }
+int requests(char **argv) {
     char buffer[BUFFER_SIZE];
-    int max_connection = atoi(argv[1]);
-    int port = atoi(argv[2]);
-
+    int port = atoi(argv[1]);
+    // Registering the handler function for the interrupt signal (CTRL-C)
     signal(SIGINT, intHandler);
 
-    conn_pool_t *pool = malloc(sizeof(conn_pool_t));
+    conn_pool_t* pool = malloc(sizeof(conn_pool_t));
     init_pool(pool);
 
     struct sockaddr_in addr;
-    int main_socket = socket(AF_INET, SOCK_STREAM, 0);
+    // Creating the welcome socket using TCP protocol
+    int welcome_socket = socket(AF_INET, SOCK_STREAM, 0);
 
-    if (main_socket < 0) {
-        perror("erorr making main socket");
+    if(welcome_socket < 0){
+        perror("ERROR creating welcome socket");
         return -1;
     }
     int on = 1;
-    ioctl(main_socket, (int) FIONBIO, (char *) &on);
+    // Setting the welcome socket to be non-blocking
+    ioctl(welcome_socket, (int)FIONBIO, (char*)&on);
 
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr=INADDR_ANY;
     addr.sin_port = htons(port);
 
-    if (bind(main_socket, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-        perror("ERORR on binding");
+    if(bind(welcome_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0){
+        perror("ERROR on binding");
         return -1;
     }
-    listen(main_socket, 5);
+    listen(welcome_socket, 5);
     FD_ZERO(&(pool->read_set));
     FD_ZERO(&(pool->write_set));
     FD_ZERO(&(pool->ready_read_set));
     FD_ZERO(&(pool->ready_write_set));
-    FD_SET(main_socket, &(pool->read_set));
+    FD_SET(welcome_socket, &(pool->read_set));
 
-    do {
-
+    do{
         pool->ready_read_set = pool->read_set;
         pool->ready_write_set = pool->write_set;
-
         printf("Waiting on select()...\nMaxFd %d\n", pool->maxfd);
+        /* Wait for a connection to be ready to be read or written to */
+        pool->nready = select(getdtablesize(),&(pool->ready_read_set),&(pool->ready_write_set),NULL,NULL);
 
-        pool->nready = select(getdtablesize(), &(pool->ready_read_set), &(pool->ready_write_set), NULL, NULL);
+        int sd = welcome_socket;
+        do{
+            /* Check if the current descriptor is in the read set */
+            if (FD_ISSET(sd,&(pool->ready_read_set))){
 
-        int sd = main_socket;
-        do {
-
-            if (FD_ISSET(sd, &(pool->ready_read_set))) {
-
-                if (sd == main_socket) {
-                    if (pool->nr_conns == max_connection) {
-                        sd++;
-                        continue;
-                    }
-                    int new_sd = accept(main_socket, NULL, NULL);
-                    if (new_sd == -1) {
-                        turn_off = 1;
+                /* Check if the current descriptor is the welcome socket */
+                if(sd == welcome_socket ){
+                    /* Accept a new connection */
+                    int new_sd = accept(welcome_socket, NULL, NULL);
+                    /* Check if the accept call was successful */
+                    if(new_sd == -1){
+                        end_server = 1;
                         break;
                     }
-                    printf("New incoming connection on sd %d\n", new_sd);
-                    add_conn(new_sd, pool);
+                    printf("New incoming connection on sd %d\n",new_sd);
+                    /* Add the new connection to the pool */
+                    add_conn(new_sd,pool);
                     break;
 
-                } else {
-                    printf("Descriptor %d is readable\n", sd);
+                }else{
+                    printf("Descriptor %d is readable\n",sd);
 
+                    /* Read data from the descriptor */
                     int len = read(sd, buffer, BUFFER_SIZE - 1);
-                    printf("%d bytes received from sd %d\n", len, sd);
-                    if (len == 0) {
+                    /* Print a message indicating how many bytes were received */
+                    printf("%d bytes received from sd %d\n",len,sd);
+                    /* Check if the read call returned 0 bytes */
+                    if(len == 0){
 
-                        printf("Connection closed for sd %d\n", sd);
-                        printf("removing connection with sd %d \n", sd);
+                        printf("Connection closed for sd %d\nremoving connection with sd %d\n",sd,sd);
 
-                        remove_conn(sd, pool);
-
+                        /* Remove the connection from the pool */
+                        remove_conn(sd,pool);
                         break;
 
-                    } else {
+                    }else{
+                        /* Add the received message to the pool */
                         add_msg(sd, buffer, len, pool);
                     }
                 }
             }
-            if (FD_ISSET(sd, &(pool->ready_write_set))) {
-                write_to_client(sd, pool);
+            if (FD_ISSET(sd,&(pool->ready_write_set))) {
+                write_to_client(sd,pool);
             }
             sd++;
-        } while (sd <= pool->maxfd);
+        } while(sd <= pool->maxfd);
 
-    } while (turn_off == 0);
+    } while (end_server == 0);
 
-    while (pool->nr_conns > 0) {
-
-        remove_conn(pool->conn_head->fd, pool);
+    while(pool->nr_conns>0){
+        remove_conn(pool->conn_head->fd,pool);
     }
     free(pool);
-
+    return 0;
+}
+int main (int argc, char *argv[])
+{
+    if(argc != 2){
+        printf("Usage: ./chatServer <port>");
+        exit(EXIT_FAILURE);
+    }
+    int req = requests(argv);
+    if(req != 0){
+        return -1;
+    }
     return 0;
 }
 
-int init_pool(conn_pool_t *pool) {
+int init_pool(conn_pool_t* pool) {
     pool->conn_head = NULL;
-    pool->nr_conns = 0;
-    pool->nready = 0;
+    pool->nr_conns =0;
+    pool->nready =0;
     return 0;
 }
 
-int add_conn(int sd, conn_pool_t *pool) {
-
-    if (pool->conn_head == NULL) {
-        pool->conn_head = (conn_t *) malloc(sizeof(conn_t));
-        if (pool->conn_head == NULL) {
-            printf("erroe malloc");
+int add_conn(int sd, conn_pool_t* pool) {
+    // Check if the connection pool is empty
+    if(pool->conn_head==NULL){
+        // Allocate memory for new connection node
+        pool->conn_head = (conn_t*) malloc(sizeof(conn_t));
+        if(pool->conn_head == NULL){
+            printf("ERROR malloc");
             return -1;
         }
+        // Increment number of connections in the pool
         pool->nr_conns++;
+        // Set the file descriptor for the new connection
         pool->conn_head->fd = sd;
+        // Set the "prev" and "next" pointers to NULL
         pool->conn_head->prev = NULL;
         pool->conn_head->next = NULL;
+        // Set the head and tail pointers for the write message queue to NULL
         pool->conn_head->write_msg_head = NULL;
         pool->conn_head->write_msg_tail = NULL;
-    } else {
-        conn_t *con, *prevConn;
-
-        for (con = pool->conn_head; con != NULL; con = con->next) {
-            prevConn = con;
+    }else{
+        // Create pointers to traverse the connection list
+        conn_t *currConn ,*prevConn;
+        // Loop through existing connections to find the last one
+        for(currConn = pool->conn_head ; currConn != NULL ; currConn = currConn->next){
+            prevConn = currConn;
         }
-
-        con = (conn_t *) malloc(sizeof(conn_t));
-        if (con == NULL) {
+        // Allocate memory for new connection node
+        currConn = (conn_t*)malloc(sizeof(conn_t));
+        if(currConn == NULL){
             return -1;
         }
-
+        // Increment number of connections in the pool
         pool->nr_conns++;
-        con->prev = prevConn;
-        con->next = NULL;
-
-        prevConn->next = con;
-
-        con->fd = sd;
-
-        con->write_msg_head = NULL;
-        con->write_msg_tail = NULL;
+        // Set the "prev" pointer to the last connection in the list
+        currConn->prev = prevConn;
+        // Set the "next" pointer to NULL
+        currConn->next = NULL;
+        // Update the "next" pointer of the last connection
+        prevConn->next = currConn;
+        // Set the file descriptor for the new connection
+        currConn->fd = sd;
+        // Set the head and tail pointers for the write message queue to NULL
+        currConn->write_msg_head = NULL;
+        currConn->write_msg_tail = NULL;
     }
-    if (sd > pool->maxfd) {
+// Update the max file descriptor value if necessary
+    if(sd > pool->maxfd){
         pool->maxfd = sd;
     }
-    FD_SET(sd, &(pool->read_set));
-    FD_SET(sd, &(pool->write_set));
+// Add the new connection's socket descriptor to the read and write sets of the connection pool
+    FD_SET(sd,&(pool->read_set));
     return 0;
 }
 
-int remove_conn(int sd, conn_pool_t *pool) {
-    conn_t *con, *prevConn;
-    for (con = pool->conn_head; con != NULL; con = con->next) {
-        if (sd == con->fd) {
-            prevConn = con->prev;
-            if (con->next != NULL && con->prev != NULL) {
+int remove_conn(int sd, conn_pool_t* pool) {
+    conn_t *currConn, *prevConn;
+    // Iterate through the connections in the pool
+    currConn = pool->conn_head;
+    do{
+        // Check if the current connection's file descriptor matches the given socket descriptor
+        if(sd == currConn->fd){
 
-                con->next->prev = prevConn;
-                prevConn->next = con->next;
-            } else if (con->next == NULL && con->prev != NULL) {
+            // Remove the connection from the linked list
+            prevConn = currConn->prev;
+            if(currConn->next != NULL && currConn->prev != NULL){
+                currConn->next->prev = prevConn;
+                prevConn->next = currConn->next;
+            }else if(currConn->next == NULL && currConn->prev != NULL){
                 prevConn->next = NULL;
-            } else if (con->prev == NULL && con->next != NULL) {
-
-                con->next->prev = NULL;
-                pool->conn_head = con->next;
-            } else {
-
+            }else if(currConn->prev == NULL && currConn->next != NULL){
+                currConn->next->prev = NULL;
+                pool->conn_head = currConn->next;
+            }else{
                 pool->conn_head = NULL;
             }
-            if (con->write_msg_head != NULL) {
-                for (msg_t *currMsg = con->write_msg_head; currMsg != NULL; currMsg = currMsg->next) {
-                    if (currMsg->prev != NULL) {
+            // Free any associated write messages
+            if(currConn->write_msg_head != NULL){
+                for(msg_t *currMsg = currConn->write_msg_head ; currMsg != NULL ; currMsg = currMsg->next){
+                    if(currMsg->prev != NULL){
                         free(currMsg->prev);
                     }
-                    if (currMsg->message != NULL) {
+                    if(currMsg->message != NULL){
                         free(currMsg->message);
                     }
-                    if (currMsg->next == NULL) {
+                    if(currMsg ->next == NULL){
                         free(currMsg);
                         break;
                     }
                 }
             }
-            FD_CLR(sd, &(pool->read_set));
-            FD_CLR(sd, &(pool->write_set));
+            FD_CLR(sd,&(pool->read_set));
+            FD_CLR(sd,&(pool->write_set));
         }
-    }
+            currConn = currConn->next;
+    }while(currConn != NULL);
     pool->nr_conns--;
-    if (sd == pool->maxfd) {
+    if(sd == pool->maxfd){
         pool->maxfd = -1;
-
-        if (pool->nr_conns > 0) {
-            for (con = pool->conn_head; con != NULL; con = con->next) {
-                if (con->fd > pool->maxfd) {
-                    pool->maxfd = con->fd;
+        if(pool->nr_conns>0){
+            for(currConn = pool->conn_head ; currConn != NULL ; currConn = currConn->next){
+                if(currConn->fd > pool->maxfd){
+                    pool->maxfd = currConn->fd;
                 }
             }
         }
     }
-
     close(sd);
-    free(con);
+    free(currConn);
     return 0;
 }
 
-int add_msg(int sd, char *buffer, int len, conn_pool_t *pool) {
-
-    conn_t *con;
-    for (con = pool->conn_head; con != NULL; con = con->next) {
-
-        if (con->fd != sd) {
-
-            msg_t *currMsg = (msg_t *) malloc(sizeof(msg_t));
-            currMsg->prev = con->write_msg_tail;
-            currMsg->next = NULL;
-            currMsg->message = (char *) malloc((len + 1));
-            strcpy(currMsg->message, buffer);
-            currMsg->message[len] = '\0';
-            currMsg->size = len;
-            con->write_msg_tail = currMsg;
-            if (con->write_msg_head == NULL) {
-                con->write_msg_head = currMsg;
+int add_msg(int sd, char* buffer, int len, conn_pool_t* pool) {
+    conn_t *client;
+    client = pool->conn_head;
+    do {
+        if (client->fd != sd) {
+            // Add the client's fd to the write set
+            FD_SET(client->fd, &(pool->write_set));
+            // Allocate memory for the message
+            msg_t *pMsg = (msg_t*)malloc(sizeof(msg_t));
+            pMsg->prev = client->write_msg_tail;
+            pMsg->next = NULL;
+            // Allocate memory for the message content
+            pMsg->message = (char*)malloc((len + 1));
+            // Copy the message content to the new memory
+            strcpy(pMsg->message, buffer);
+            pMsg->message[len] = '\0';
+            pMsg->size = len;
+            client->write_msg_tail = pMsg;
+            if (client->write_msg_head == NULL) {
+                client->write_msg_head = pMsg;
             }
-
         }
-    }
+        client = client->next;
+    } while (client != NULL);
     return 0;
 }
 
-int write_to_client(int sd, conn_pool_t *pool) {
-    conn_t *currCon;
-    for (currCon = pool->conn_head; currCon != NULL; currCon = currCon->next) {
-        if (currCon->fd == sd) {
+
+int write_to_client(int sd,conn_pool_t* pool) {
+    conn_t *client;
+// Find the client connection associated with the given socket descriptor
+    client = pool->conn_head;
+    do {
+        if (client->fd == sd) {
             break;
         }
-    }
-    if (msg_head == NULL) {
+        client = client->next;
+    } while (client != NULL);
+    // If there are no messages to write, return 0
+    if (client->write_msg_head == NULL) {
         return 0;
     }
+// Iterate through the message list and write each message to the client
     msg_t *currMsg;
-    for (currMsg = currCon->write_msg_head; currMsg != NULL; currMsg = currMsg->next) {
-
+    currMsg = client->write_msg_head;
+    do {
+        // free the prev message
         if (currMsg->prev != NULL) {
             free(currMsg->prev);
         }
-        if (write(currCon->fd, currMsg->message, currMsg->size) < 0) {
+        // write the current message to the client
+        if (write(client->fd, currMsg->message, currMsg->size) < 0) {
             return -1;
         }
+        // free the current message
         free(currMsg->message);
+        currMsg = currMsg->next;
+    } while (currMsg != NULL);
 
-        if (currMsg->next == NULL) {
-            free(currMsg);
-            break;
-        }
-    }
-    msg_head = NULL;
-    msg_tail = NULL;
+    FD_CLR(sd, &pool->write_set);
+    FD_CLR(sd, &pool->ready_write_set);
+    // Reset write message head and tail for this client
+    client->write_msg_head = NULL;
+    client->write_msg_tail = NULL;
     return 0;
 }
